@@ -1,0 +1,64 @@
+bundle:
+  name: olist-lakehouse
+
+variables:
+  catalog:
+    default: olist
+  landing_path:
+    default: abfss://landing@stolistlake.dfs.core.windows.net/olist
+
+artifacts:
+  wheel:
+    type: whl
+    path: .
+
+resources:
+  jobs:
+    olist_medallion:
+      name: olist-medallion-${bundle.target}
+      schedule:
+        quartz_cron_expression: "0 0 3 * * ?"
+        timezone_id: Africa/Casablanca
+      email_notifications:
+        on_failure: []
+      job_clusters:
+        - job_cluster_key: main
+          new_cluster:
+            spark_version: 15.4.x-scala2.12
+            node_type_id: Standard_D4ds_v5
+            num_workers: 1
+            data_security_mode: SINGLE_USER
+            spark_env_vars:
+              OLIST_CATALOG: ${var.catalog}
+              OLIST_LANDING_PATH: ${var.landing_path}
+      tasks:
+        - task_key: bronze
+          job_cluster_key: main
+          spark_python_task:
+            python_file: jobs/run_pipeline.py
+            parameters: ["--layer", "bronze"]
+          libraries:
+            - whl: ./dist/*.whl
+        - task_key: silver
+          depends_on: [{ task_key: bronze }]
+          job_cluster_key: main
+          spark_python_task:
+            python_file: jobs/run_pipeline.py
+            parameters: ["--layer", "silver"]
+          libraries:
+            - whl: ./dist/*.whl
+        - task_key: gold
+          depends_on: [{ task_key: silver }]
+          job_cluster_key: main
+          spark_python_task:
+            python_file: jobs/run_pipeline.py
+            parameters: ["--layer", "gold"]
+          libraries:
+            - whl: ./dist/*.whl
+
+targets:
+  dev:
+    mode: development
+    default: true
+  prod:
+    mode: production
