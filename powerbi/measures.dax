@@ -46,3 +46,14 @@ CALCULATE ( [Avg Review Score], fact_sales[is_late] = TRUE () )
 
 Review Score On Time =
 CALCULATE ( [Avg Review Score], fact_sales[is_late] = FALSE () )
+
+// ---- late delivery scores (gold.late_delivery_scores) ----
+
+Open Orders Scored = COUNTROWS ( late_delivery_scores )
+
+High Risk Orders =
+CALCULATE ( COUNTROWS ( late_delivery_scores ), late_delivery_scores[risk_band] = "high" )
+
+High Risk % = DIVIDE ( [High Risk Orders], [Open Orders Scored] )
+
+Avg Late Probability = AVERAGE ( late_delivery_scores[late_probability] )

@@ -15,3 +15,6 @@ derby.log
 .terraform.lock.hcl
 .env
 .venv/
+mlflow.db
+mlruns/
+mlartifacts/

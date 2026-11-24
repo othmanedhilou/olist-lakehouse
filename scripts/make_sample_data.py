@@ -12,7 +12,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 STATES = {"SP": (-23.55, -46.63), "RJ": (-22.90, -43.20), "MG": (-19.92, -43.94),
-          "RS": (-30.03, -51.23), "PR": (-25.43, -49.27), "BA": (-12.97, -38.50)}
+          "RS": (-30.03, -51.23), "PR": (-25.43, -49.27), "BA": (-12.97, -38.50),
+          "PE": (-8.05, -34.88), "AM": (-3.12, -60.02)}
 CATEGORIES = [("beleza_saude", "health_beauty"), ("informatica_acessorios", "computers_accessories"),
               ("moveis_decoracao", "furniture_decor"), ("esporte_lazer", "sports_leisure"),
               ("cama_mesa_banho", "bed_bath_table"), ("relogios_presentes", "watches_gifts")]
@@ -64,23 +65,37 @@ def main():
 
     orders, items, payments, reviews = [], [], [], []
     start = datetime(2017, 1, 1)
+    cust_state = {c[0]: c[4] for c in customers}
+    seller_state = {x[0]: x[3] for x in sellers}
+    weight = {pr[0]: pr[5] for pr in products}
+
+    def km(s1, s2):
+        (a1, b1), (a2, b2) = STATES[s1], STATES[s2]
+        return ((a1 - a2) ** 2 + (b1 - b2) ** 2) ** 0.5 * 111
+
     for _ in range(a.orders):
         oid = uid()
         cust = random.choice(customers)[0]
         bought = start + timedelta(minutes=random.randint(0, 60 * 24 * 600))
-        estimated = bought + timedelta(days=random.randint(15, 30))
+        promised = random.randint(18, 34)
+        estimated = bought + timedelta(days=promised)
         status = random.choices(["delivered", "shipped", "canceled", "invoiced"], [92, 4, 3, 1])[0]
-        delivered = bought + timedelta(days=random.randint(3, 35)) if status == "delivered" else None
+        lines = []
+        for i in range(1, random.choices([1, 2, 3], [85, 12, 3])[0] + 1):
+            prod, seller = random.choice(products)[0], random.choice(sellers)[0]
+            lines.append((i, prod, seller, round(random.uniform(15, 400), 2), round(random.uniform(5, 40), 2)))
+        # delivery time grows with distance, parcel weight, number of sellers and year-end peak
+        dist = km(cust_state[cust], seller_state[lines[0][2]])
+        days = (5 + dist / 120 + sum(weight[ln[1]] for ln in lines) / 1500 + 3 * (len({ln[2] for ln in lines}) - 1)
+                + (6 if bought.month in (11, 12) else 0) + random.gauss(0, 4))
+        delivered = bought + timedelta(days=max(1.0, days)) if status == "delivered" else None
         orders.append([oid, cust, status, bought.strftime(FMT), (bought + timedelta(hours=2)).strftime(FMT),
                        (bought + timedelta(days=2)).strftime(FMT) if delivered else "",
                        delivered.strftime(FMT) if delivered else "", estimated.strftime("%Y-%m-%d 00:00:00")])
         total = 0.0
-        for i in range(1, random.choices([1, 2, 3], [85, 12, 3])[0] + 1):
-            price = round(random.uniform(15, 400), 2)
-            freight = round(random.uniform(5, 40), 2)
+        for i, prod, seller, price, freight in lines:
             total += price + freight
-            items.append([oid, i, random.choice(products)[0], random.choice(sellers)[0],
-                          (bought + timedelta(days=5)).strftime(FMT), price, freight])
+            items.append([oid, i, prod, seller, (bought + timedelta(days=5)).strftime(FMT), price, freight])
         payments.append([oid, 1, random.choice(PAYMENT_TYPES), random.randint(1, 10), round(total, 2)])
         if delivered:
             late = delivered > estimated

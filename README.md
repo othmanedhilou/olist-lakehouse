@@ -6,6 +6,8 @@ passées entre 2016 et 2018 sur une marketplace brésilienne, réparties dans 9 
 
 Le pipeline suit une architecture médaillon (bronze / silver / gold) en PySpark et Delta Lake,
 avec chargement incrémental, contrôles qualité bloquants et un modèle en étoile exploité dans Power BI.
+Sur les tables du lakehouse, un modèle XGBoost prédit les commandes qui seront livrées en retard ;
+l'entraînement, les métriques et les versions du modèle sont suivis dans MLflow.
 
 ## Architecture
 
@@ -23,6 +25,10 @@ CSV Olist ──> ADLS Gen2 (landing)
         gold    : fact_sales + dim_customer / dim_product / dim_seller / dim_date
                   + kpi_monthly
                  │
+                 ├──> ml_order_features ──> entraînement XGBoost (MLflow)
+                 │                              │ registre Unity Catalog, alias champion
+                 │                              ▼
+                 │                     late_delivery_scores (commandes en cours)
                  ▼
              Power BI
 ```
@@ -50,6 +56,53 @@ Définis dans `src/olist_lakehouse/quality.py` et exécutés avant toute écritu
 - valeurs autorisées (statuts de commande).
 
 Un contrôle bloquant en échec arrête le job. Certains contrôles sont déclarés en avertissement seulement (par exemple les délais de livraison aberrants, qui existent dans les données d'origine).
+
+## Prédiction des retards de livraison
+
+Environ 8 % des commandes Olist sont livrées après la date promise au client, et ce sont elles qui
+font chuter la note des avis. Le modèle estime, au moment de l'achat, la probabilité qu'une commande
+arrive en retard, pour que le service client puisse prévenir ou prioriser les expéditions.
+
+**Variables** (`src/olist_lakehouse/ml/features.py`), une ligne par commande :
+
+- panier : nombre d'articles et de vendeurs, prix, fret, part du fret, poids et volume total ;
+- trajet : distance client - vendeur (haversine entre les centroïdes de code postal), même État ou non ;
+- promesse : nombre de jours entre l'achat et la date de livraison estimée ;
+- contexte : mois, jour, heure d'achat, catégorie principale, mode de paiement, nombre d'échéances.
+
+Seules les informations connues au moment de l'achat sont utilisées. Les dates de remise au
+transporteur et de livraison ou la note d'avis sont exclues, un test le vérifie.
+
+**Entraînement** (`src/olist_lakehouse/ml/train.py`) :
+
+- découpage temporel : apprentissage sur les commandes les plus anciennes, évaluation sur les 20 % les plus récentes ;
+- régression logistique comme référence, puis XGBoost avec pondération de la classe minoritaire ;
+- métriques : ROC AUC, PR AUC (plus parlante quand la classe positive est rare), précision et rappel
+  sur les 10 % de commandes jugées les plus risquées ;
+- tout est enregistré dans MLflow : paramètres, métriques des deux modèles, importance des variables,
+  prédictions sur le jeu de test, modèle avec sa signature ;
+- le modèle est enregistré dans le registre (Unity Catalog sur Databricks) et reçoit l'alias
+  `champion` seulement si sa PR AUC dépasse celle de la version en place.
+
+**Scoring** : le job `score_orders.py` charge `models:/olist.ml.late_delivery@champion`, note les
+commandes pas encore livrées et écrit `gold.late_delivery_scores` (probabilité et niveau de risque),
+affichée dans une page Power BI.
+
+En local, avec MLflow sur un fichier SQLite :
+
+```bash
+python scripts/make_sample_data.py --out data/sample --orders 6000
+python jobs/train_local.py --input data/sample
+mlflow ui --backend-store-uri sqlite:///mlflow.db
+```
+
+Sur les données d'exemple (générées, où le délai dépend de la distance, du poids, du nombre de
+vendeurs et du pic de fin d'année), XGBoost obtient une PR AUC de 0,89 contre 0,88 pour la régression
+logistique. Ces chiffres ne valent que pour ces données simulées ; les résultats sur le vrai jeu Olist
+s'obtiennent avec la même commande après `download_data.sh`.
+
+Sur Databricks, les tâches `train_late_delivery` puis `score_open_orders` s'ajoutent au job après silver,
+sur un cluster ML Runtime mono-nœud.
 
 ## Lancer le projet en local
 
@@ -95,7 +148,7 @@ python jobs/run_local.py --input data/raw --output data/gold
 
 3. **Unity Catalog** : créer une storage credential à partir de l'access connector (sortie `access_connector_id`), une external location sur le conteneur `lakehouse`, puis le catalogue `olist`.
 
-4. **Job** : le fichier `databricks.yml` décrit un job en trois tâches (bronze → silver → gold) planifié chaque nuit.
+4. **Job** : le fichier `databricks.yml` décrit un job planifié chaque nuit : bronze → silver → gold, et en parallèle de gold l'entraînement puis le scoring.
 
    ```bash
    databricks bundle deploy -t dev
@@ -114,13 +167,15 @@ Pages du rapport :
 
 - **Ventes** : chiffre d'affaires mensuel, panier moyen, top catégories, répartition par État ;
 - **Livraison** : délai moyen, taux de retard par État vendeur et par catégorie ;
-- **Satisfaction** : note moyenne, impact du retard sur la note.
+- **Satisfaction** : note moyenne, impact du retard sur la note ;
+- **Risque de retard** : commandes en cours classées par probabilité de retard.
 
 ## Structure
 
 ```
 src/olist_lakehouse/   code du pipeline (bronze, silver, quality, gold, merge)
-jobs/                  points d'entrée Databricks et local
+src/olist_lakehouse/ml variables, entraînement MLflow, scoring
+jobs/                  points d'entrée Databricks et local (pipeline, entraînement, scoring)
 tests/                 tests unitaires PySpark
 scripts/               téléchargement, envoi vers Azure, données d'exemple
 infra/terraform/       infrastructure Azure

@@ -31,6 +31,19 @@ resources:
             spark_env_vars:
               OLIST_CATALOG: ${var.catalog}
               OLIST_LANDING_PATH: ${var.landing_path}
+        - job_cluster_key: ml
+          new_cluster:
+            spark_version: 15.4.x-cpu-ml-scala2.12
+            node_type_id: Standard_D4ds_v5
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.master: local[*]
+              spark.databricks.cluster.profile: singleNode
+            custom_tags:
+              ResourceClass: SingleNode
+            spark_env_vars:
+              OLIST_CATALOG: ${var.catalog}
       tasks:
         - task_key: bronze
           job_cluster_key: main
@@ -53,6 +66,21 @@ resources:
           spark_python_task:
             python_file: jobs/run_pipeline.py
             parameters: ["--layer", "gold"]
+          libraries:
+            - whl: ./dist/*.whl
+
+        - task_key: train_late_delivery
+          depends_on: [{ task_key: silver }]
+          job_cluster_key: ml
+          spark_python_task:
+            python_file: jobs/train_model.py
+          libraries:
+            - whl: ./dist/*.whl
+        - task_key: score_open_orders
+          depends_on: [{ task_key: train_late_delivery }]
+          job_cluster_key: ml
+          spark_python_task:
+            python_file: jobs/score_orders.py
           libraries:
             - whl: ./dist/*.whl
 
